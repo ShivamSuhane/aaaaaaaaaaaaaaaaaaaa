@@ -51,6 +51,15 @@ export function EditMantra() {
     setIsDefault(!isDefault);
   };
 
+  // ── Reminder toggle — show coming soon toast ──────────────────────────────────
+  const handleReminderToggle = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const enabled = e.target.checked;
+    setReminderEnabled(enabled);
+    if (enabled) {
+      showToast('🔔 Reminder feature coming soon!', 'info');
+    }
+  };
+
   const handleMalaSizeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     if (value === '') {
@@ -76,7 +85,6 @@ export function EditMantra() {
 
     const practiceDays = isAllDays ? [0, 1, 2, 3, 4, 5, 6] : selectedDays;
 
-    // If setting as default, remove default from all others first
     if (isDefault) {
       setMantras(prev => prev.map(m => 
         m.id === mantra.id ? m : { ...m, isDefault: false }
@@ -102,7 +110,6 @@ export function EditMantra() {
     setCurrentView('savedMantras');
   };
 
-  // Check if another mantra is default
   const otherDefaultMantra = mantras.find(m => m.isDefault && m.id !== mantra.id);
 
   return (
@@ -288,12 +295,23 @@ export function EditMantra() {
               <i className="fas fa-bell text-indigo-500"></i>
               Daily Reminder
             </label>
+
+            {/* Coming Soon Badge */}
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 px-2 py-0.5 rounded-full font-semibold border border-amber-200 dark:border-amber-700">
+                🔔 Coming Soon
+              </span>
+              <span className="text-xs text-gray-400 dark:text-gray-500">
+                Notifications will be available in next update
+              </span>
+            </div>
+
             <div className="flex items-center gap-3 mb-3">
               <label className="relative inline-flex items-center cursor-pointer">
                 <input
                   type="checkbox"
                   checked={reminderEnabled}
-                  onChange={(e) => setReminderEnabled(e.target.checked)}
+                  onChange={handleReminderToggle}
                   className="sr-only peer"
                 />
                 <div className="w-14 h-7 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-slate-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[4px] after:bg-white after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-indigo-600"></div>

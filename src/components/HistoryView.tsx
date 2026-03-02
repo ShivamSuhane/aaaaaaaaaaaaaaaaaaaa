@@ -18,6 +18,17 @@ const SACRED_MESSAGES = [
   "Each count is a prayer heard by the universe"
 ];
 
+// ── Monday-based week helper ──────────────────────────────────────────────────
+// Returns the Monday of the week containing the given date
+const getMondayOfWeek = (date: Date): Date => {
+  const d = new Date(date);
+  const day = d.getDay(); // 0=Sun,1=Mon,...,6=Sat
+  // distance to previous Monday: if Sunday(0) go back 6 days, else go back (day-1) days
+  const diff = day === 0 ? 6 : day - 1;
+  d.setDate(d.getDate() - diff);
+  return d;
+};
+
 interface HistoryEntry {
   dateStr: string;
   displayDate: string;
@@ -43,6 +54,21 @@ interface BarData {
   endDate: string;
   displayRange: string;
   isCurrent: boolean;
+  weekNumber?: number;
+  // drill-down context
+  year?: number;
+  month?: number;
+  weekStart?: string;
+}
+
+type DrillLevel = 'yearly' | 'monthly' | 'weekly' | 'daily';
+
+interface DrillState {
+  level: DrillLevel;
+  year?: number;
+  month?: number;
+  weekStart?: string;
+  label?: string;
 }
 
 export function HistoryView() {
@@ -56,7 +82,24 @@ export function HistoryView() {
   const [viewEntry, setViewEntry] = useState<HistoryEntry | null>(null);
   const [remarkModal, setRemarkModal] = useState<{ date: string; remark: string } | null>(null);
   const barsContainerRef = useRef<HTMLDivElement>(null);
-  const hasAutoScrolled = useRef(false);
+
+  // Drill-down state (null = normal filterType view)
+  const [drillState, setDrillState] = useState<DrillState | null>(null);
+
+  // Double-click tracking
+  const lastClickTime = useRef<{ index: number; time: number }>({ index: -1, time: 0 });
+
+  // Swipe states for filter buttons
+  const [filterTouchStart, setFilterTouchStart] = useState<number | null>(null);
+  const [filterTouchEnd, setFilterTouchEnd] = useState<number | null>(null);
+  const [isFilterSwiping, setIsFilterSwiping] = useState(false);
+
+  // Swipe states for bars
+  const [barTouchStart, setBarTouchStart] = useState<number | null>(null);
+  const [barTouchEnd, setBarTouchEnd] = useState<number | null>(null);
+  const [isBarSwiping, setIsBarSwiping] = useState(false);
+
+  const minSwipeDistance = 40;
 
   const mantra = selectedMantra;
 
@@ -65,7 +108,86 @@ export function HistoryView() {
     return null;
   }
 
-  // Helper: Format date as DD/MM/YY
+  // ── Filter swipe handlers ─────────────────────────────────────────────────────
+  const handleFilterTouchStart = (e: React.TouchEvent) => {
+    setFilterTouchEnd(null);
+    setFilterTouchStart(e.targetTouches[0].clientX);
+    setIsFilterSwiping(true);
+  };
+
+  const handleFilterTouchMove = (e: React.TouchEvent) => {
+    setFilterTouchEnd(e.targetTouches[0].clientX);
+  };
+
+  const handleFilterTouchEnd = () => {
+    setIsFilterSwiping(false);
+    if (!filterTouchStart || !filterTouchEnd) return;
+
+    const distance = filterTouchStart - filterTouchEnd;
+    const isLeftSwipe = distance > minSwipeDistance;
+    const isRightSwipe = distance < -minSwipeDistance;
+
+    if (isRightSwipe) {
+      if (filterType === 'weekly') setFilterType('monthly');
+      else if (filterType === 'monthly') setFilterType('yearly');
+    }
+    if (isLeftSwipe) {
+      if (filterType === 'yearly') setFilterType('monthly');
+      else if (filterType === 'monthly') setFilterType('weekly');
+    }
+
+    setFilterTouchStart(null);
+    setFilterTouchEnd(null);
+  };
+
+  // ── Bar swipe handlers ────────────────────────────────────────────────────────
+  const handleBarTouchStart = (e: React.TouchEvent) => {
+    setBarTouchEnd(null);
+    setBarTouchStart(e.targetTouches[0].clientX);
+    setIsBarSwiping(true);
+  };
+
+  const handleBarTouchMove = (e: React.TouchEvent) => {
+    setBarTouchEnd(e.targetTouches[0].clientX);
+  };
+
+  const handleBarTouchEnd = () => {
+    setIsBarSwiping(false);
+    if (!barTouchStart || !barTouchEnd) return;
+
+    const distance = barTouchStart - barTouchEnd;
+    const isLeftSwipe = distance > minSwipeDistance;
+    const isRightSwipe = distance < -minSwipeDistance;
+
+    if (isRightSwipe && selectedBarIndex < barsData.length - 1) {
+      const newIndex = selectedBarIndex + 1;
+      setSelectedBarIndex(newIndex);
+      scrollToBar(newIndex);
+    }
+    if (isLeftSwipe && selectedBarIndex > 0) {
+      const newIndex = selectedBarIndex - 1;
+      setSelectedBarIndex(newIndex);
+      scrollToBar(newIndex);
+    }
+
+    setBarTouchStart(null);
+    setBarTouchEnd(null);
+  };
+
+  const scrollToBar = (index: number) => {
+    if (barsContainerRef.current) {
+      const barElements = barsContainerRef.current.children;
+      if (barElements[index]) {
+        (barElements[index] as HTMLElement).scrollIntoView({
+          behavior: 'smooth',
+          block: 'nearest',
+          inline: 'center',
+        });
+      }
+    }
+  };
+
+  // ── Date helpers ──────────────────────────────────────────────────────────────
   const formatDate = (date: Date): string => {
     const d = date.getDate().toString().padStart(2, '0');
     const m = (date.getMonth() + 1).toString().padStart(2, '0');
@@ -73,7 +195,6 @@ export function HistoryView() {
     return `${d}/${m}/${y}`;
   };
 
-  // Helper: Format date as YYYY-MM-DD
   const formatDateStr = (date: Date): string => {
     const y = date.getFullYear();
     const m = (date.getMonth() + 1).toString().padStart(2, '0');
@@ -81,13 +202,11 @@ export function HistoryView() {
     return `${y}-${m}-${d}`;
   };
 
-  // Helper: Parse YYYY-MM-DD to Date
   const parseDate = (dateStr: string): Date => {
     const [y, m, d] = dateStr.split('-').map(Number);
     return new Date(y, m - 1, d);
   };
 
-  // Helper: Parse createdAt
   const parseCreatedAt = (createdAt: string): Date => {
     if (createdAt.includes('T')) {
       const d = new Date(createdAt);
@@ -96,38 +215,43 @@ export function HistoryView() {
     return parseDate(createdAt);
   };
 
-  // Get today's date
   const today = new Date();
   const todayStr = formatDateStr(today);
 
-  // Get mantra added date
   const mantraAddedDate = parseCreatedAt(mantra.createdAt);
   const mantraAddedStr = formatDateStr(mantraAddedDate);
   const mantraAddedDisplay = formatDate(mantraAddedDate);
 
-  // Calculate days since mantra added
-  const daysSinceAdded = Math.floor((today.getTime() - mantraAddedDate.getTime()) / (1000 * 60 * 60 * 24));
-  const isAddedToday = daysSinceAdded === 0;
+  const daysSinceAdded = Math.floor(
+    (today.getTime() - mantraAddedDate.getTime()) / (1000 * 60 * 60 * 24)
+  );
 
-  // Generate history data
+  // ── Get count for any date string ────────────────────────────────────────────
+  const getDayCount = (dStr: string): number => {
+    if (dStr === todayStr) return mantra.todayCount || 0;
+    const entry = mantra.dailyHistory?.find(h => h.date === dStr);
+    return entry?.mantraCount || 0;
+  };
+
+  // ── History data — up to 30 days, never before mantra added date ──────────────
   const historyData = useMemo(() => {
     const data: HistoryEntry[] = [];
     const maxDays = 30;
-    
+
     for (let i = 0; i < maxDays; i++) {
       const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
       const dateStr = formatDateStr(date);
-      
-      if (date < mantraAddedDate) continue;
-      
+
+      if (date < mantraAddedDate) break;
+
       const dayOfWeek = date.getDay();
       const isPracticeDay = mantra.practiceDays.includes(dayOfWeek);
       const isToday = dateStr === todayStr;
-      
+
       let mantraCount = 0;
       let beadsUpdated = false;
       let settingsUpdated = false;
-      
+
       if (isToday) {
         mantraCount = mantra.todayCount || 0;
         const todayEntry = mantra.dailyHistory?.find(h => h.date === dateStr);
@@ -143,9 +267,9 @@ export function HistoryView() {
           settingsUpdated = historyEntry.status.settingsUpdated || false;
         }
       }
-      
+
       const malaCount = Math.floor(mantraCount / mantra.malaSize);
-      
+
       const remarks: string[] = [];
       if (dateStr === mantraAddedStr) remarks.push('🆕 Journey Started');
       if (malaCount > 0) remarks.push(`🎯 ${malaCount} Mala${malaCount > 1 ? 's' : ''}`);
@@ -154,7 +278,7 @@ export function HistoryView() {
       else remarks.push('⏸️ Rest Day');
       if (beadsUpdated) remarks.push('🔄 Beads Updated');
       if (settingsUpdated) remarks.push('⚙️ Settings Changed');
-      
+
       data.push({
         dateStr,
         displayDate: formatDate(date),
@@ -167,54 +291,165 @@ export function HistoryView() {
         isToday,
         remarks,
         beadsUpdated,
-        settingsUpdated
+        settingsUpdated,
       });
     }
-    
+
     return data;
   }, [mantra, todayStr, mantraAddedStr]);
 
-  // Generate bars data based on filter type - with proper current selection
+  // ── barsData with drill-down support — Monday-based weeks ────────────────────
   const barsData = useMemo(() => {
     const bars: BarData[] = [];
     const addedDate = mantraAddedDate;
-    
+
+    // ── DRILL: daily (week → 7 days Mon–Sun) ─────────────────────────────────
+    if (drillState?.level === 'daily' && drillState.weekStart) {
+      const weekStartDate = parseDate(drillState.weekStart); // this is always a Monday
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(weekStartDate);
+        d.setDate(d.getDate() + i);
+        if (d < addedDate || d > today) continue;
+        const dStr = formatDateStr(d);
+        const count = getDayCount(dStr);
+        bars.push({
+          label: DAYS_SHORT[d.getDay()],
+          count,
+          malas: Math.floor(count / mantra.malaSize),
+          activeDays: count > 0 ? 1 : 0,
+          totalDays: 1,
+          startDate: dStr,
+          endDate: dStr,
+          displayRange: `${DAYS_FULL[d.getDay()]}, ${formatDate(d)}`,
+          isCurrent: dStr === todayStr,
+        });
+      }
+      return bars;
+    }
+
+    // ── DRILL: weekly (month → Monday-based weeks) ────────────────────────────
+    if (
+      drillState?.level === 'weekly' &&
+      drillState.year !== undefined &&
+      drillState.month !== undefined
+    ) {
+      const monthStart = new Date(drillState.year, drillState.month, 1);
+      const monthEnd = new Date(drillState.year, drillState.month + 1, 0);
+
+      // Find Monday of the week containing monthStart
+      let wStart = getMondayOfWeek(monthStart);
+
+      let weekNum = 1;
+      while (wStart <= monthEnd) {
+        const wEnd = new Date(wStart);
+        wEnd.setDate(wEnd.getDate() + 6); // Sunday
+
+        const effStart = new Date(
+          Math.max(wStart.getTime(), addedDate.getTime(), monthStart.getTime())
+        );
+        const effEnd = new Date(
+          Math.min(wEnd.getTime(), today.getTime(), monthEnd.getTime())
+        );
+
+        if (effStart <= effEnd) {
+          let count = 0, activeDays = 0, totalDays = 0;
+          for (let d = new Date(effStart); d <= effEnd; d.setDate(d.getDate() + 1)) {
+            totalDays++;
+            const dc = getDayCount(formatDateStr(d));
+            count += dc;
+            if (dc > 0) activeDays++;
+          }
+          const wEndOfDay = new Date(wEnd);
+          wEndOfDay.setHours(23, 59, 59, 999);
+          const isCurrent = today >= wStart && today <= wEndOfDay;
+          bars.push({
+            label: `W${weekNum}`,
+            count,
+            malas: Math.floor(count / mantra.malaSize),
+            activeDays,
+            totalDays,
+            startDate: formatDateStr(effStart),
+            endDate: formatDateStr(effEnd),
+            displayRange: `${formatDate(effStart)} → ${formatDate(effEnd)}`,
+            isCurrent,
+            weekNumber: weekNum,
+            year: drillState.year,
+            month: drillState.month,
+            weekStart: formatDateStr(wStart),
+          });
+          weekNum++;
+        }
+        wStart.setDate(wStart.getDate() + 7);
+      }
+      return bars;
+    }
+
+    // ── DRILL: monthly (year → months) ───────────────────────────────────────
+    if (drillState?.level === 'monthly' && drillState.year !== undefined) {
+      for (let m = 0; m < 12; m++) {
+        const mStart = new Date(drillState.year, m, 1);
+        const mEnd = new Date(drillState.year, m + 1, 0);
+
+        if (mStart > today || mEnd < addedDate) continue;
+
+        const effStart = new Date(Math.max(mStart.getTime(), addedDate.getTime()));
+        const effEnd = new Date(Math.min(mEnd.getTime(), today.getTime()));
+
+        if (effStart <= effEnd) {
+          let count = 0, activeDays = 0, totalDays = 0;
+          for (let d = new Date(effStart); d <= effEnd; d.setDate(d.getDate() + 1)) {
+            totalDays++;
+            const dc = getDayCount(formatDateStr(d));
+            count += dc;
+            if (dc > 0) activeDays++;
+          }
+          const isCurrent =
+            m === today.getMonth() && drillState.year === today.getFullYear();
+          bars.push({
+            label: MONTHS_SHORT[m],
+            count,
+            malas: Math.floor(count / mantra.malaSize),
+            activeDays,
+            totalDays,
+            startDate: formatDateStr(effStart),
+            endDate: formatDateStr(effEnd),
+            displayRange: `${formatDate(effStart)} → ${formatDate(effEnd)}`,
+            isCurrent,
+            year: drillState.year,
+            month: m,
+          });
+        }
+      }
+      return bars;
+    }
+
+    // ── NORMAL: weekly — Monday-based ─────────────────────────────────────────
     if (filterType === 'weekly') {
-      let currentDate = new Date(today);
-      const currentDay = currentDate.getDay();
-      const daysToSunday = currentDay === 0 ? 0 : 7 - currentDay;
-      currentDate.setDate(currentDate.getDate() + daysToSunday);
-      
-      while (currentDate >= addedDate) {
-        const weekEnd = new Date(currentDate);
-        const weekStart = new Date(currentDate);
-        weekStart.setDate(weekStart.getDate() - 6);
-        
+      // Start from the Monday of the week when mantra was added
+      let weekStart = getMondayOfWeek(addedDate);
+
+      let weekNumber = 1;
+      while (weekStart <= today) {
+        const weekEnd = new Date(weekStart);
+        weekEnd.setDate(weekEnd.getDate() + 6); // Sunday
+
         const effectiveStart = weekStart < addedDate ? addedDate : weekStart;
         const effectiveEnd = weekEnd > today ? today : weekEnd;
-        
+
         if (effectiveStart <= effectiveEnd) {
           let count = 0, activeDays = 0, totalDays = 0;
-          
           for (let d = new Date(effectiveStart); d <= effectiveEnd; d.setDate(d.getDate() + 1)) {
             totalDays++;
-            const dStr = formatDateStr(d);
-            
-            let dayCount = 0;
-            if (dStr === todayStr) dayCount = mantra.todayCount || 0;
-            else {
-              const entry = mantra.dailyHistory?.find(h => h.date === dStr);
-              dayCount = entry?.mantraCount || 0;
-            }
-            
-            count += dayCount;
-            if (dayCount > 0) activeDays++;
+            const dc = getDayCount(formatDateStr(d));
+            count += dc;
+            if (dc > 0) activeDays++;
           }
-          
-          const isCurrent = effectiveEnd >= today && effectiveStart <= today;
-          
-          bars.unshift({
-            label: `W${bars.length + 1}`,
+          // Extend weekEnd to end of Sunday so time comparison works correctly
+          const weekEndOfDay = new Date(weekEnd);
+          weekEndOfDay.setHours(23, 59, 59, 999);
+          const isCurrent = today >= weekStart && today <= weekEndOfDay;
+          bars.push({
+            label: `W${weekNumber}`,
             count,
             malas: Math.floor(count / mantra.malaSize),
             activeDays,
@@ -222,48 +457,41 @@ export function HistoryView() {
             startDate: formatDateStr(effectiveStart),
             endDate: formatDateStr(effectiveEnd),
             displayRange: `${formatDate(effectiveStart)} → ${formatDate(effectiveEnd)}`,
-            isCurrent
+            isCurrent,
+            weekNumber,
+            weekStart: formatDateStr(weekStart),
           });
+          weekNumber++;
         }
-        
-        currentDate.setDate(currentDate.getDate() - 7);
+        weekStart.setDate(weekStart.getDate() + 7);
       }
-      
-      bars.reverse();
-      
+
+    // ── NORMAL: monthly ───────────────────────────────────────────────────────
     } else if (filterType === 'monthly') {
-      let currentMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-      const addedMonth = new Date(addedDate.getFullYear(), addedDate.getMonth(), 1);
-      
-      while (currentMonth >= addedMonth) {
+      let currentMonth = new Date(addedDate.getFullYear(), addedDate.getMonth(), 1);
+      const todayMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+      let monthNumber = 1;
+
+      while (currentMonth <= todayMonth) {
         const monthStart = new Date(currentMonth);
         const monthEnd = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0);
-        
+
         const effectiveStart = monthStart < addedDate ? addedDate : monthStart;
         const effectiveEnd = monthEnd > today ? today : monthEnd;
-        
+
         if (effectiveStart <= effectiveEnd) {
           let count = 0, activeDays = 0, totalDays = 0;
-          
           for (let d = new Date(effectiveStart); d <= effectiveEnd; d.setDate(d.getDate() + 1)) {
             totalDays++;
-            const dStr = formatDateStr(d);
-            
-            let dayCount = 0;
-            if (dStr === todayStr) dayCount = mantra.todayCount || 0;
-            else {
-              const entry = mantra.dailyHistory?.find(h => h.date === dStr);
-              dayCount = entry?.mantraCount || 0;
-            }
-            
-            count += dayCount;
-            if (dayCount > 0) activeDays++;
+            const dc = getDayCount(formatDateStr(d));
+            count += dc;
+            if (dc > 0) activeDays++;
           }
-          
-          const isCurrent = currentMonth.getMonth() === today.getMonth() && currentMonth.getFullYear() === today.getFullYear();
-          
-          bars.unshift({
-            label: MONTHS_SHORT[currentMonth.getMonth()],
+          const isCurrent =
+            currentMonth.getMonth() === today.getMonth() &&
+            currentMonth.getFullYear() === today.getFullYear();
+          bars.push({
+            label: `M${monthNumber}`,
             count,
             malas: Math.floor(count / mantra.malaSize),
             activeDays,
@@ -271,48 +499,39 @@ export function HistoryView() {
             startDate: formatDateStr(effectiveStart),
             endDate: formatDateStr(effectiveEnd),
             displayRange: `${formatDate(effectiveStart)} → ${formatDate(effectiveEnd)}`,
-            isCurrent
+            isCurrent,
+            year: currentMonth.getFullYear(),
+            month: currentMonth.getMonth(),
           });
+          monthNumber++;
         }
-        
-        currentMonth.setMonth(currentMonth.getMonth() - 1);
+        currentMonth.setMonth(currentMonth.getMonth() + 1);
       }
-      
-      bars.reverse();
-      
+
+    // ── NORMAL: yearly ────────────────────────────────────────────────────────
     } else {
-      let currentYear = today.getFullYear();
-      const addedYear = addedDate.getFullYear();
-      
-      while (currentYear >= addedYear) {
+      let currentYear = addedDate.getFullYear();
+      const todayYear = today.getFullYear();
+      let yearNumber = 1;
+
+      while (currentYear <= todayYear) {
         const yearStart = new Date(currentYear, 0, 1);
         const yearEnd = new Date(currentYear, 11, 31);
-        
+
         const effectiveStart = yearStart < addedDate ? addedDate : yearStart;
         const effectiveEnd = yearEnd > today ? today : yearEnd;
-        
+
         if (effectiveStart <= effectiveEnd) {
           let count = 0, activeDays = 0, totalDays = 0;
-          
           for (let d = new Date(effectiveStart); d <= effectiveEnd; d.setDate(d.getDate() + 1)) {
             totalDays++;
-            const dStr = formatDateStr(d);
-            
-            let dayCount = 0;
-            if (dStr === todayStr) dayCount = mantra.todayCount || 0;
-            else {
-              const entry = mantra.dailyHistory?.find(h => h.date === dStr);
-              dayCount = entry?.mantraCount || 0;
-            }
-            
-            count += dayCount;
-            if (dayCount > 0) activeDays++;
+            const dc = getDayCount(formatDateStr(d));
+            count += dc;
+            if (dc > 0) activeDays++;
           }
-          
           const isCurrent = currentYear === today.getFullYear();
-          
-          bars.unshift({
-            label: currentYear.toString(),
+          bars.push({
+            label: `Y${yearNumber}`,
             count,
             malas: Math.floor(count / mantra.malaSize),
             activeDays,
@@ -320,51 +539,115 @@ export function HistoryView() {
             startDate: formatDateStr(effectiveStart),
             endDate: formatDateStr(effectiveEnd),
             displayRange: `${formatDate(effectiveStart)} → ${formatDate(effectiveEnd)}`,
-            isCurrent
+            isCurrent,
+            year: currentYear,
           });
+          yearNumber++;
         }
-        
-        currentYear--;
+        currentYear++;
       }
-      
-      bars.reverse();
     }
-    
+
     return bars;
-  }, [mantra, filterType, todayStr]);
+  }, [mantra, filterType, todayStr, drillState]);
 
-  const maxCount = useMemo(() => Math.max(...barsData.map(b => b.count), 1), [barsData]);
+  const maxCount = useMemo(
+    () => Math.max(...barsData.map(b => b.count), 1),
+    [barsData]
+  );
 
-  // Auto-scroll to current/latest bar and select it
+  // ── Auto-scroll to current/latest bar ────────────────────────────────────────
   useEffect(() => {
     if (barsData.length > 0) {
-      // Find current bar (with green dot)
       const currentIndex = barsData.findIndex(bar => bar.isCurrent);
-      
-      // If current found, select that, otherwise select latest
       const indexToSelect = currentIndex >= 0 ? currentIndex : barsData.length - 1;
       setSelectedBarIndex(indexToSelect);
-      
-      // Scroll to selected bar
-      if (barsContainerRef.current) {
-        setTimeout(() => {
-          if (barsContainerRef.current) {
-            const barElements = barsContainerRef.current.children;
-            if (barElements.length > 0) {
-              const targetBar = barElements[indexToSelect] as HTMLElement;
-              if (targetBar) {
-                targetBar.scrollIntoView({
-                  behavior: 'smooth',
-                  block: 'nearest',
-                  inline: indexToSelect === barsData.length - 1 ? 'end' : 'center'
-                });
-              }
+
+      setTimeout(() => {
+        if (barsContainerRef.current) {
+          const barElements = barsContainerRef.current.children;
+          if (barElements.length > 0) {
+            const targetBar = barElements[indexToSelect] as HTMLElement;
+            if (targetBar) {
+              targetBar.scrollIntoView({
+                behavior: 'smooth',
+                block: 'nearest',
+                inline: indexToSelect === barsData.length - 1 ? 'end' : 'center',
+              });
             }
           }
-        }, 100);
+        }
+      }, 100);
+    }
+  }, [barsData, filterType, drillState]);
+
+  // ── Handle bar click — single select + double-click drill-down ────────────────
+  const handleBarClick = (index: number, bar: BarData) => {
+    const now = Date.now();
+    const isDoubleClick =
+      lastClickTime.current.index === index && now - lastClickTime.current.time < 400;
+
+    if (isDoubleClick) {
+      lastClickTime.current = { index: -1, time: 0 };
+
+      if (!drillState) {
+        if (filterType === 'yearly' && bar.year !== undefined) {
+          setDrillState({ level: 'monthly', year: bar.year, label: `${bar.year}` });
+        } else if (filterType === 'monthly' && bar.year !== undefined && bar.month !== undefined) {
+          setDrillState({
+            level: 'weekly',
+            year: bar.year,
+            month: bar.month,
+            label: `${MONTHS_SHORT[bar.month]} ${bar.year}`,
+          });
+        } else if (filterType === 'weekly' && bar.weekStart) {
+          setDrillState({ level: 'daily', weekStart: bar.weekStart, label: bar.displayRange });
+        }
+      } else if (drillState.level === 'monthly' && bar.year !== undefined && bar.month !== undefined) {
+        setDrillState({
+          level: 'weekly',
+          year: bar.year,
+          month: bar.month,
+          label: `${drillState.label} > ${MONTHS_SHORT[bar.month]}`,
+        });
+      } else if (drillState.level === 'weekly' && bar.weekStart) {
+        setDrillState({
+          level: 'daily',
+          weekStart: bar.weekStart,
+          label: `${drillState.label} > ${bar.label}`,
+        });
+      }
+      // daily level — no further drill
+    } else {
+      lastClickTime.current = { index, time: now };
+      setSelectedBarIndex(index);
+    }
+  };
+
+  // ── Drill back one level ──────────────────────────────────────────────────────
+  const handleDrillBack = () => {
+    if (!drillState) return;
+    if (drillState.level === 'monthly') {
+      setDrillState(null);
+    } else if (drillState.level === 'weekly') {
+      if (drillState.year !== undefined) {
+        setDrillState({ level: 'monthly', year: drillState.year, label: `${drillState.year}` });
+      } else {
+        setDrillState(null);
+      }
+    } else if (drillState.level === 'daily') {
+      if (drillState.year !== undefined && drillState.month !== undefined) {
+        setDrillState({
+          level: 'weekly',
+          year: drillState.year,
+          month: drillState.month,
+          label: drillState.label?.split(' > ').slice(0, -1).join(' > ') || '',
+        });
+      } else {
+        setDrillState(null);
       }
     }
-  }, [barsData, filterType]);
+  };
 
   const selectedStats = barsData[selectedBarIndex] || {
     label: '-',
@@ -373,20 +656,19 @@ export function HistoryView() {
     activeDays: 0,
     totalDays: 0,
     displayRange: '-',
-    isCurrent: false
+    isCurrent: false,
   };
 
-  const getRandomSacredMessage = () => {
-    return SACRED_MESSAGES[Math.floor(Math.random() * SACRED_MESSAGES.length)];
-  };
+  const getRandomSacredMessage = () =>
+    SACRED_MESSAGES[Math.floor(Math.random() * SACRED_MESSAGES.length)];
 
-  // Save remark
+  // ── Save remark ───────────────────────────────────────────────────────────────
   const saveRemark = () => {
     if (!remarkModal || !mantra) return;
-    
+
     const dailyHistory = [...(mantra.dailyHistory || [])];
     const existingIndex = dailyHistory.findIndex(h => h.date === remarkModal.date);
-    
+
     if (existingIndex >= 0) {
       dailyHistory[existingIndex] = {
         ...dailyHistory[existingIndex],
@@ -402,25 +684,51 @@ export function HistoryView() {
         status: { practiced: false, beadsUpdated: false, settingsUpdated: false, missed: true },
       });
     }
-    
+
     updateMantra(mantra.id, { dailyHistory });
     setRemarkModal(null);
     showToast('Remark saved! 🙏', 'success');
   };
 
-  // Get remark text
-  const getRemarkText = (entry: HistoryEntry) => {
-    return entry.remarks.join(', ');
-  };
-
-  // Get row class
+  // ── Row highlight class ───────────────────────────────────────────────────────
   const getRowClass = (entry: HistoryEntry) => {
     if (entry.mantraCount > 0) return 'bg-green-50 dark:bg-green-900/10';
     if (entry.isPracticeDay) return 'bg-red-50 dark:bg-red-900/10';
     return 'bg-gray-50 dark:bg-gray-800/50';
   };
 
-  // Generate PDF Report with Yearly Summary
+  // ── Label helpers ─────────────────────────────────────────────────────────────
+  const getDrillLevelLabel = () => {
+    if (!drillState) {
+      if (filterType === 'weekly') return 'Weekly';
+      if (filterType === 'monthly') return 'Monthly';
+      return 'Yearly';
+    }
+    if (drillState.level === 'monthly') return `${drillState.year} — Months`;
+    if (drillState.level === 'weekly') return `${drillState.label} — Weeks`;
+    if (drillState.level === 'daily') return `${drillState.label} — Days`;
+    return '';
+  };
+
+  const getBarsCountLabel = () => {
+    if (drillState?.level === 'daily') return 'DAYS';
+    if (drillState?.level === 'weekly') return 'WEEKS';
+    if (drillState?.level === 'monthly') return 'MONTHS';
+    if (filterType === 'weekly') return 'WEEKS';
+    if (filterType === 'monthly') return 'MONTHS';
+    return 'YEARS';
+  };
+
+  const getSelectedLabel = () => {
+    if (drillState?.level === 'daily') return 'Day';
+    if (drillState?.level === 'weekly') return 'Week';
+    if (drillState?.level === 'monthly') return 'Month';
+    if (filterType === 'weekly') return 'Week';
+    if (filterType === 'monthly') return 'Month';
+    return 'Year';
+  };
+
+  // ── PDF Report ────────────────────────────────────────────────────────────────
   const generatePDFReport = () => {
     if (!fromDate || !toDate) {
       showToast('Please select date range', 'warning');
@@ -429,7 +737,7 @@ export function HistoryView() {
 
     const start = parseDate(fromDate);
     const end = parseDate(toDate);
-    
+
     if (start > end) {
       showToast('From date cannot be after to date', 'error');
       return;
@@ -437,13 +745,13 @@ export function HistoryView() {
 
     showToast('Generating your spiritual report... 📄', 'info');
 
-    // Filter data for selected date range
-    const filteredData = historyData.filter(entry => {
-      const entryDate = parseDate(entry.dateStr);
-      return entryDate >= start && entryDate <= end;
-    }).reverse();
+    const filteredData = historyData
+      .filter(entry => {
+        const entryDate = parseDate(entry.dateStr);
+        return entryDate >= start && entryDate <= end;
+      })
+      .reverse();
 
-    // Calculate stats
     const totalMantras = filteredData.reduce((sum, d) => sum + d.mantraCount, 0);
     const totalMalas = Math.floor(totalMantras / mantra.malaSize);
     const practicedDays = filteredData.filter(d => d.mantraCount > 0).length;
@@ -453,11 +761,9 @@ export function HistoryView() {
     const practiceRate = totalDays > 0 ? Math.round((practicedDays / totalDays) * 100) : 0;
     const avgPerDay = totalDays > 0 ? Math.round(totalMantras / totalDays) : 0;
 
-    // Calculate streaks
     let currentStreak = 0;
     let longestStreak = 0;
     let streakCount = 0;
-    
     for (let i = 0; i < filteredData.length; i++) {
       if (filteredData[i].mantraCount > 0) {
         streakCount++;
@@ -468,7 +774,6 @@ export function HistoryView() {
       }
     }
 
-    // Find best day
     let bestDay = { date: '', day: '', count: 0, malas: 0 };
     filteredData.forEach(day => {
       if (day.mantraCount > bestDay.count) {
@@ -476,24 +781,21 @@ export function HistoryView() {
           date: day.displayDate,
           day: day.dayName,
           count: day.mantraCount,
-          malas: Math.floor(day.mantraCount / mantra.malaSize)
+          malas: Math.floor(day.mantraCount / mantra.malaSize),
         };
       }
     });
 
-    // Day-wise analysis
     const dayWiseData: { [key: string]: { count: number; days: number } } = {};
-    DAYS_FULL.forEach(day => dayWiseData[day] = { count: 0, days: 0 });
-    
+    DAYS_FULL.forEach(day => (dayWiseData[day] = { count: 0, days: 0 }));
     filteredData.forEach(day => {
       if (day.mantraCount > 0) {
         dayWiseData[day.dayName].count += day.mantraCount;
         dayWiseData[day.dayName].days++;
       }
     });
-    
     const maxDayCount = Math.max(...Object.values(dayWiseData).map(v => v.count), 1);
-    
+
     let mostPracticedDay = '';
     let mostPracticedCount = 0;
     Object.entries(dayWiseData).forEach(([day, data]) => {
@@ -503,7 +805,6 @@ export function HistoryView() {
       }
     });
 
-    // Weekly data
     const weeklyData: { label: string; count: number; malas: number; days: number }[] = [];
     for (let i = 0; i < filteredData.length; i += 7) {
       const weekData = filteredData.slice(i, i + 7);
@@ -517,7 +818,6 @@ export function HistoryView() {
     }
     const maxWeekCount = Math.max(...weeklyData.map(w => w.count), 1);
 
-    // Monthly data
     const monthlyMap = new Map<string, { count: number; malas: number; days: number; total: number }>();
     filteredData.forEach(day => {
       const monthKey = day.dateStr.substring(0, 7);
@@ -530,7 +830,6 @@ export function HistoryView() {
     });
     const maxMonthCount = Math.max(...Array.from(monthlyMap.values()).map(v => v.count), 1);
 
-    // Yearly data
     const yearlyMap = new Map<string, { count: number; malas: number; days: number; total: number }>();
     filteredData.forEach(day => {
       const yearKey = day.dateStr.substring(0, 4);
@@ -543,7 +842,6 @@ export function HistoryView() {
     });
     const maxYearCount = Math.max(...Array.from(yearlyMap.values()).map(v => v.count), 1);
 
-    // Prepare HTML content
     const printContent = `
       <!DOCTYPE html>
       <html>
@@ -551,128 +849,33 @@ export function HistoryView() {
           <title>Mantra Report - ${mantra.name}</title>
           <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { 
-              font-family: 'Segoe UI', Arial, sans-serif; 
-              padding: 25px; 
-              color: #333; 
-              font-size: 13px; 
-              background: #fff;
-            }
-            h1 { 
-              color: #4f46e5; 
-              text-align: center; 
-              font-size: 24px; 
-              margin-bottom: 5px; 
-            }
-            h2 { 
-              color: #4f46e5; 
-              font-size: 18px; 
-              border-bottom: 2px solid #4f46e5; 
-              padding-bottom: 5px; 
-              margin: 25px 0 15px 0; 
-            }
-            h3 { 
-              color: #6366f1; 
-              font-size: 15px; 
-              margin: 15px 0 10px 0; 
-            }
-            .header-info { 
-              text-align: center; 
-              color: #666; 
-              margin-bottom: 25px; 
-              font-size: 13px; 
-            }
-            .header-info p { 
-              margin: 3px 0; 
-            }
-            .stats-grid { 
-              display: grid; 
-              grid-template-columns: repeat(3, 1fr); 
-              gap: 10px; 
-              margin: 15px 0; 
-            }
-            .stat-box { 
-              border-radius: 8px; 
-              padding: 15px 8px; 
-              text-align: center; 
-            }
+            body { font-family: 'Segoe UI', Arial, sans-serif; padding: 25px; color: #333; font-size: 13px; background: #fff; }
+            h1 { color: #4f46e5; text-align: center; font-size: 24px; margin-bottom: 5px; }
+            h2 { color: #4f46e5; font-size: 18px; border-bottom: 2px solid #4f46e5; padding-bottom: 5px; margin: 25px 0 15px 0; }
+            h3 { color: #6366f1; font-size: 15px; margin: 15px 0 10px 0; }
+            .header-info { text-align: center; color: #666; margin-bottom: 25px; font-size: 13px; }
+            .header-info p { margin: 3px 0; }
+            .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 15px 0; }
+            .stat-box { border-radius: 8px; padding: 15px 8px; text-align: center; }
             .stat-box.indigo { background: #eef2ff; border-left: 4px solid #4f46e5; }
             .stat-box.emerald { background: #ecfdf5; border-left: 4px solid #10b981; }
             .stat-box.amber { background: #fffbeb; border-left: 4px solid #f59e0b; }
             .stat-box.purple { background: #faf5ff; border-left: 4px solid #a855f7; }
             .stat-box.blue { background: #eff6ff; border-left: 4px solid #3b82f6; }
             .stat-box.red { background: #fef2f2; border-left: 4px solid #ef4444; }
-            .stat-value { 
-              font-size: 24px; 
-              font-weight: bold; 
-              color: #1f2937; 
-            }
-            .stat-label { 
-              font-size: 11px; 
-              color: #6b7280; 
-              margin-top: 5px; 
-              text-transform: uppercase; 
-              letter-spacing: 0.5px; 
-            }
-            .info-card { 
-              background: #f9fafb; 
-              border-radius: 8px; 
-              padding: 12px 15px; 
-              margin: 10px 0; 
-              border-left: 4px solid #4f46e5; 
-              display: flex; 
-              justify-content: space-between; 
-              align-items: center; 
-            }
+            .stat-value { font-size: 24px; font-weight: bold; color: #1f2937; }
+            .stat-label { font-size: 11px; color: #6b7280; margin-top: 5px; text-transform: uppercase; letter-spacing: 0.5px; }
+            .info-card { background: #f9fafb; border-radius: 8px; padding: 12px 15px; margin: 10px 0; border-left: 4px solid #4f46e5; display: flex; justify-content: space-between; align-items: center; }
             .info-card.gold { border-left-color: #f59e0b; background: #fffbeb; }
             .info-card.green { border-left-color: #10b981; background: #ecfdf5; }
             .info-card.red { border-left-color: #ef4444; background: #fef2f2; }
-            .info-label { 
-              font-size: 12px; 
-              color: #6b7280; 
-            }
-            .info-value { 
-              font-size: 14px; 
-              font-weight: 700; 
-              color: #1f2937; 
-            }
-            .chart-container { 
-              margin: 15px 0; 
-              padding: 20px; 
-              background: #f9fafb; 
-              border-radius: 8px; 
-              border: 1px solid #e5e7eb; 
-            }
-            .bar-row { 
-              display: flex; 
-              align-items: center; 
-              margin: 8px 0; 
-            }
-            .bar-label { 
-              width: 80px; 
-              font-size: 12px; 
-              font-weight: 600; 
-              color: #374151; 
-            }
-            .bar-track { 
-              flex: 1; 
-              height: 24px; 
-              background: #e5e7eb; 
-              border-radius: 4px; 
-              overflow: hidden; 
-              margin: 0 10px; 
-            }
-            .bar-fill { 
-              height: 100%; 
-              border-radius: 4px; 
-              display: flex; 
-              align-items: center; 
-              padding-left: 8px; 
-              color: white; 
-              font-size: 11px; 
-              font-weight: 600; 
-              min-width: 30px; 
-            }
+            .info-label { font-size: 12px; color: #6b7280; }
+            .info-value { font-size: 14px; font-weight: 700; color: #1f2937; }
+            .chart-container { margin: 15px 0; padding: 20px; background: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb; }
+            .bar-row { display: flex; align-items: center; margin: 8px 0; }
+            .bar-label { width: 80px; font-size: 12px; font-weight: 600; color: #374151; }
+            .bar-track { flex: 1; height: 24px; background: #e5e7eb; border-radius: 4px; overflow: hidden; margin: 0 10px; }
+            .bar-fill { height: 100%; border-radius: 4px; display: flex; align-items: center; padding-left: 8px; color: white; font-size: 11px; font-weight: 600; min-width: 30px; }
             .bar-fill.indigo { background: #4f46e5; }
             .bar-fill.emerald { background: #10b981; }
             .bar-fill.amber { background: #f59e0b; }
@@ -680,100 +883,22 @@ export function HistoryView() {
             .bar-fill.blue { background: #3b82f6; }
             .bar-fill.pink { background: #ec4899; }
             .bar-fill.red { background: #ef4444; }
-            .bar-value { 
-              width: 100px; 
-              text-align: right; 
-              font-size: 12px; 
-              font-weight: 600; 
-              color: #374151; 
-            }
-            .indicator-note {
-              background: #eef2ff;
-              padding: 10px 15px;
-              border-radius: 6px;
-              margin: 10px 0;
-              font-size: 11px;
-              color: #4f46e5;
-              border-left: 3px solid #4f46e5;
-            }
-            .indicator-note strong {
-              color: #1f2937;
-            }
-            .pie-container {
-              display: flex;
-              flex-direction: column;
-              align-items: center;
-              margin: 20px 0;
-            }
-            .pie-chart {
-              width: 160px;
-              height: 160px;
-              border-radius: 50%;
-              background: conic-gradient(
-                #10b981 0% ${practiceRate}%,
-                #ef4444 ${practiceRate}% ${practiceRate + (missedDays / Math.max(totalDays, 1) * 100)}%,
-                #d1d5db ${practiceRate + (missedDays / Math.max(totalDays, 1) * 100)}% 100%
-              );
-              margin: 0 auto;
-            }
-            .pie-inner {
-              width: 100px;
-              height: 100px;
-              border-radius: 50%;
-              background: white;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              font-size: 24px;
-              font-weight: bold;
-              color: #10b981;
-              margin: 30px auto 0;
-            }
-            .legend {
-              display: flex;
-              justify-content: center;
-              gap: 20px;
-              margin-top: 15px;
-              font-size: 12px;
-            }
-            .legend-item {
-              display: flex;
-              align-items: center;
-              gap: 5px;
-            }
-            .legend-color {
-              width: 14px;
-              height: 14px;
-              border-radius: 3px;
-            }
-            table { 
-              width: 100%; 
-              border-collapse: collapse; 
-              margin-top: 15px; 
-              font-size: 12px; 
-            }
-            th { 
-              background: #4f46e5; 
-              color: white; 
-              padding: 10px 8px; 
-              text-align: left; 
-              font-size: 12px; 
-            }
-            td { 
-              padding: 8px; 
-              border-bottom: 1px solid #e5e7eb; 
-            }
+            .bar-value { width: 100px; text-align: right; font-size: 12px; font-weight: 600; color: #374151; }
+            .indicator-note { background: #eef2ff; padding: 10px 15px; border-radius: 6px; margin: 10px 0; font-size: 11px; color: #4f46e5; border-left: 3px solid #4f46e5; }
+            .indicator-note strong { color: #1f2937; }
+            .pie-container { display: flex; flex-direction: column; align-items: center; margin: 20px 0; }
+            .pie-chart { width: 160px; height: 160px; border-radius: 50%; background: conic-gradient(#10b981 0% ${practiceRate}%, #ef4444 ${practiceRate}% ${practiceRate + (missedDays / Math.max(totalDays, 1) * 100)}%, #d1d5db ${practiceRate + (missedDays / Math.max(totalDays, 1) * 100)}% 100%); margin: 0 auto; }
+            .pie-inner { width: 100px; height: 100px; border-radius: 50%; background: white; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; color: #10b981; margin: 30px auto 0; }
+            .legend { display: flex; justify-content: center; gap: 20px; margin-top: 15px; font-size: 12px; }
+            .legend-item { display: flex; align-items: center; gap: 5px; }
+            .legend-color { width: 14px; height: 14px; border-radius: 3px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 12px; }
+            th { background: #4f46e5; color: white; padding: 10px 8px; text-align: left; font-size: 12px; }
+            td { padding: 8px; border-bottom: 1px solid #e5e7eb; }
             tr:nth-child(even) { background: #f9fafb; }
             .non-practice { background: #f3f4f6 !important; color: #9ca3af; }
             .missed { background: #fef2f2 !important; }
-            .footer { 
-              text-align: center; 
-              margin-top: 30px; 
-              color: #9ca3af; 
-              font-size: 11px; 
-              border-top: 1px solid #e5e7eb; 
-              padding-top: 15px; 
-            }
+            .footer { text-align: center; margin-top: 30px; color: #9ca3af; font-size: 11px; border-top: 1px solid #e5e7eb; padding-top: 15px; }
             .page-break { page-break-before: always; }
           </style>
         </head>
@@ -787,7 +912,6 @@ export function HistoryView() {
             <p><strong>Practitioner:</strong> ${userName || 'Guest User'}</p>
           </div>
 
-          <!-- 📌 INDICATORS EXPLANATION -->
           <div class="indicator-note">
             <strong>📊 How to read these indicators:</strong><br>
             • <strong>21 (1d)</strong> = 21 mantras practiced on 1 day<br>
@@ -809,12 +933,12 @@ export function HistoryView() {
             <div><span class="info-label">⭐ BEST PRACTICE DAY</span><div class="info-value">${bestDay.day}, ${bestDay.date}</div></div>
             <div class="info-value">${bestDay.count} mantras (${bestDay.malas} malas)</div>
           </div>
-          
+
           <div class="info-card green">
             <div><span class="info-label">🔥 STREAK</span><div class="info-value">Current: ${currentStreak} days</div></div>
             <div class="info-value">Best: ${longestStreak} days</div>
           </div>
-          
+
           <div class="info-card red">
             <div><span class="info-label">📅 PRACTICE SUMMARY</span><div class="info-value">Practiced: ${practicedDays} | Missed: ${missedDays} | Rest: ${restDays}</div></div>
           </div>
@@ -874,7 +998,6 @@ export function HistoryView() {
             }).join('')}
           </div>
 
-          <!-- 📆 YEARLY SUMMARY -->
           <h2>📆 YEARLY SUMMARY</h2>
           <div class="chart-container">
             ${Array.from(yearlyMap.entries()).map(([year, data]) => {
@@ -906,7 +1029,7 @@ export function HistoryView() {
           </div>
 
           <div class="page-break"></div>
-          
+
           <h1>🕉️ MANTRA METER - DAILY LOGS</h1>
           <div class="header-info">
             <p><strong>Mantra:</strong> ${mantra.name} | <strong>Added:</strong> ${mantraAddedDisplay}</p>
@@ -954,7 +1077,7 @@ export function HistoryView() {
       printWindow.document.close();
       printWindow.print();
     }
-    
+
     setShowDatePicker(false);
     showToast('PDF Report generated successfully! 📄', 'success');
   };
@@ -967,8 +1090,10 @@ export function HistoryView() {
     }
   }, [showDatePicker]);
 
+  // ── RENDER ────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-slate-900 flex flex-col">
+
       {/* Remark Modal */}
       {remarkModal && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
@@ -984,10 +1109,16 @@ export function HistoryView() {
               className="w-full p-3 border-2 border-gray-200 dark:border-slate-600 rounded-lg bg-gray-50 dark:bg-slate-700 text-gray-800 dark:text-white mb-3"
             />
             <div className="flex gap-2">
-              <button onClick={() => setRemarkModal(null)} className="flex-1 bg-gray-200 dark:bg-slate-700 text-gray-700 dark:text-gray-300 py-2 rounded-lg font-semibold">
+              <button
+                onClick={() => setRemarkModal(null)}
+                className="flex-1 bg-gray-200 dark:bg-slate-700 text-gray-700 dark:text-gray-300 py-2 rounded-lg font-semibold"
+              >
                 Cancel
               </button>
-              <button onClick={saveRemark} className="flex-1 bg-indigo-600 text-white py-2 rounded-lg font-semibold">
+              <button
+                onClick={saveRemark}
+                className="flex-1 bg-indigo-600 text-white py-2 rounded-lg font-semibold"
+              >
                 Save
               </button>
             </div>
@@ -1008,7 +1139,11 @@ export function HistoryView() {
       <div className="bg-indigo-50 dark:bg-indigo-900/20 px-4 py-2 flex items-center gap-2 border-b border-indigo-100 dark:border-indigo-800">
         <i className="fas fa-info-circle text-indigo-500"></i>
         <span className="text-sm text-indigo-700 dark:text-indigo-300">
-          Mantra added: <strong>{mantraAddedDisplay}</strong> ({daysSinceAdded === 0 ? 'Today' : `${daysSinceAdded} day${daysSinceAdded > 1 ? 's' : ''} ago`})
+          Mantra added: <strong>{mantraAddedDisplay}</strong> (
+          {daysSinceAdded === 0
+            ? 'Today'
+            : `${daysSinceAdded} day${daysSinceAdded > 1 ? 's' : ''} ago`}
+          )
         </span>
       </div>
 
@@ -1020,7 +1155,9 @@ export function HistoryView() {
         </span>
         <span className="text-gray-600 dark:text-gray-400">
           <i className="fas fa-calendar text-indigo-500 mr-1"></i>
-          {mantra.practiceDays.length === 7 ? 'All Days' : mantra.practiceDays.map(d => DAYS_SHORT[d]).join(', ')}
+          {mantra.practiceDays.length === 7
+            ? 'All Days'
+            : mantra.practiceDays.map(d => DAYS_SHORT[d]).join(', ')}
         </span>
         <span className="text-gray-600 dark:text-gray-400">
           <i className="fas fa-clock text-indigo-500 mr-1"></i>
@@ -1028,24 +1165,55 @@ export function HistoryView() {
         </span>
       </div>
 
-      {/* Filter Buttons */}
-      <div className="flex bg-gray-100 dark:bg-slate-800">
-        {(['weekly', 'monthly', 'yearly'] as const).map((type, index) => (
+      {/* Filter Buttons — hidden during drill-down */}
+      {!drillState && (
+        <div
+          className={`flex bg-gray-100 dark:bg-slate-800 select-none transition-opacity duration-150 ${isFilterSwiping ? 'opacity-80' : ''}`}
+          onTouchStart={handleFilterTouchStart}
+          onTouchMove={handleFilterTouchMove}
+          onTouchEnd={handleFilterTouchEnd}
+        >
+          {(['weekly', 'monthly', 'yearly'] as const).map((type, index) => (
+            <button
+              key={type}
+              onClick={() => setFilterType(type)}
+              className={`flex-1 py-3 text-sm font-bold uppercase tracking-wide transition-all duration-200
+                ${filterType === type
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-gray-200 dark:bg-slate-700 text-gray-600 dark:text-gray-400'
+                }
+                ${index > 0 ? 'border-l border-gray-300 dark:border-slate-600' : ''}
+              `}
+            >
+              {type}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Drill-down breadcrumb bar */}
+      {drillState && (
+        <div className="flex items-center bg-indigo-600 text-white text-sm">
+          {/* CHANGE 3: Back and Reset buttons equal size */}
           <button
-            key={type}
-            onClick={() => setFilterType(type)}
-            className={`flex-1 py-3 text-sm font-bold uppercase tracking-wide transition-all
-              ${filterType === type 
-                ? 'bg-indigo-600 text-white' 
-                : 'bg-gray-200 dark:bg-slate-700 text-gray-600 dark:text-gray-400'
-              }
-              ${index > 0 ? 'border-l border-gray-300 dark:border-slate-600' : ''}
-            `}
+            onClick={handleDrillBack}
+            className="flex items-center justify-center gap-1 bg-white/20 py-2 px-4 font-semibold active:bg-white/30 transition-all w-16 flex-shrink-0"
           >
-            {type}
+            <i className="fas fa-arrow-left text-xs"></i>
+            <span className="text-xs">Back</span>
           </button>
-        ))}
-      </div>
+          <span className="flex-1 text-center font-semibold truncate text-sm px-2">
+            📊 {drillState.label}
+          </span>
+          {/* CHANGE 3: Reset button same width as Back */}
+          <button
+            onClick={() => setDrillState(null)}
+            className="flex items-center justify-center bg-white/20 py-2 px-4 font-semibold text-xs active:bg-white/30 transition-all w-16 flex-shrink-0"
+          >
+            Reset
+          </button>
+        </div>
+      )}
 
       {/* Journey Timeline */}
       <div className="bg-white dark:bg-slate-800 px-4 py-3 flex items-center justify-center gap-2 text-sm border-b border-gray-100 dark:border-slate-700">
@@ -1060,83 +1228,130 @@ export function HistoryView() {
       <div className="bg-white dark:bg-slate-800 p-4 border-b border-gray-100 dark:border-slate-700">
         <div className="flex justify-between items-center mb-3">
           <h3 className="font-bold text-gray-800 dark:text-white text-sm">
-            {filterType === 'weekly' ? 'Weekly' : filterType === 'monthly' ? 'Monthly' : 'Yearly'} Progress
+            {getDrillLevelLabel()} Progress
           </h3>
           <span className="text-xs bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 px-2 py-1 rounded-full font-bold">
-            {barsData.length} {filterType === 'weekly' ? 'WEEKS' : filterType === 'monthly' ? 'MONTHS' : 'YEARS'}
+            {barsData.length} {getBarsCountLabel()}
           </span>
         </div>
 
-        {/* Bars Container */}
-        <div 
+        {/* CHANGE 2: daily drill bars fill full width — use justify between with flex-1 */}
+        {/* Bars Container with Swipe */}
+        <div
           ref={barsContainerRef}
-          className="flex gap-3 overflow-x-auto pb-4 scrollbar-thin scroll-smooth cursor-grab active:cursor-grabbing"
-          style={{ 
+          className={`pb-4 select-none transition-all duration-200 ${isBarSwiping ? 'scale-[0.99]' : ''}
+            ${drillState?.level === 'daily'
+              ? 'flex gap-1'                          // daily: 7 bars, edge-to-edge, equal width
+              : 'flex gap-3 overflow-x-auto scrollbar-thin scroll-smooth cursor-grab active:cursor-grabbing'
+            }
+          `}
+          style={{
             scrollbarWidth: 'thin',
             WebkitOverflowScrolling: 'touch',
-            userSelect: 'none'
+            userSelect: 'none',
           }}
+          onTouchStart={handleBarTouchStart}
+          onTouchMove={handleBarTouchMove}
+          onTouchEnd={handleBarTouchEnd}
         >
           {barsData.map((bar, index) => {
             const heightPercent = Math.max((bar.count / maxCount) * 100, 8);
-            
+            const isDaily = drillState?.level === 'daily';
             return (
               <div
                 key={index}
-                onClick={() => setSelectedBarIndex(index)}
-                className={`flex flex-col items-center min-w-[50px] cursor-pointer transition-all
+                onClick={() => handleBarClick(index, bar)}
+                className={`flex flex-col items-center cursor-pointer transition-all duration-200
+                  ${isDaily ? 'flex-1' : 'min-w-[50px]'}
                   ${selectedBarIndex === index ? 'scale-105' : 'opacity-60'}
                 `}
               >
-                <div className={`w-10 h-24 rounded-lg relative overflow-visible flex items-end
-                  ${selectedBarIndex === index 
-                    ? 'bg-gradient-to-t from-indigo-600 to-purple-500 shadow-lg' 
-                    : 'bg-gray-200 dark:bg-slate-700'
-                  }`}
+                <div
+                  className={`w-full h-24 rounded-lg relative overflow-visible flex items-end transition-all duration-200
+                    ${isDaily ? 'max-w-[44px] mx-auto' : 'w-10'}
+                    ${selectedBarIndex === index
+                      ? 'bg-gradient-to-t from-indigo-600 to-purple-500 shadow-lg'
+                      : 'bg-gray-200 dark:bg-slate-700'
+                    }`}
                 >
-                  <div 
+                  <div
                     className={`w-full transition-all duration-300 rounded-t-sm
-                      ${selectedBarIndex === index 
-                        ? 'bg-gradient-to-t from-amber-400 to-orange-500' 
+                      ${selectedBarIndex === index
+                        ? 'bg-gradient-to-t from-amber-400 to-orange-500'
                         : 'bg-indigo-400'
                       }`}
-                    style={{ 
-                      height: `${heightPercent}%`,
-                      minHeight: '4px'
-                    }}
+                    style={{ height: `${heightPercent}%`, minHeight: '4px' }}
                   />
-                  
                   {selectedBarIndex === index && bar.count > 0 && (
-                    <span className="absolute -top-5 left-1/2 transform -translate-x-1/2 text-xs font-bold text-indigo-600 dark:text-indigo-400">
+                    <span className="absolute -top-5 left-1/2 transform -translate-x-1/2 text-xs font-bold text-indigo-600 dark:text-indigo-400 whitespace-nowrap">
                       {bar.count}
                     </span>
                   )}
                 </div>
-                
-                <span className={`text-xs mt-2 font-semibold
-                  ${selectedBarIndex === index ? 'text-indigo-600 dark:text-indigo-400' : 'text-gray-400'}
-                `}>
+
+                <span
+                  className={`text-xs mt-2 font-semibold transition-colors duration-200
+                    ${selectedBarIndex === index
+                      ? 'text-indigo-600 dark:text-indigo-400'
+                      : 'text-gray-400'
+                    }
+                  `}
+                >
                   {bar.label}
                 </span>
-                
-                {/* Green dot for current period */}
+
                 {bar.isCurrent && (
-                  <div className="w-2 h-2 bg-green-500 rounded-full mt-1" />
+                  <div className="w-2 h-2 bg-green-500 rounded-full mt-1 animate-pulse" />
                 )}
               </div>
             );
           })}
         </div>
-        
-        {/* Scroll Indicator */}
-        <div className="h-1 bg-gray-200 dark:bg-slate-700 rounded-full mt-2 overflow-hidden">
-          <div 
-            className="h-full bg-indigo-500 rounded-full transition-all"
-            style={{ 
-              width: `${Math.max(20, (100 / barsData.length))}%`,
-              marginLeft: `${(selectedBarIndex / Math.max(barsData.length - 1, 1)) * (100 - Math.max(20, (100 / barsData.length)))}%`
+
+        {/* CHANGE 1: Slider with ⏮ ⏭ — zero padding on buttons so they touch screen edges */}
+        <div className="flex items-center mt-2 -mx-4">
+          {/* ⏮ Jump to first bar — flush to left edge */}
+          <button
+            onClick={() => {
+              if (barsData.length === 0) return;
+              setSelectedBarIndex(0);
+              scrollToBar(0);
             }}
-          />
+            disabled={barsData.length === 0 || selectedBarIndex === 0}
+            className="text-xl text-indigo-500 dark:text-indigo-400 disabled:opacity-25 active:scale-90 transition-transform flex-shrink-0 w-10 flex items-center justify-center select-none leading-none h-8"
+            title="Go to first"
+          >
+            ⏮
+          </button>
+
+          {/* Slider track */}
+          <div className="flex-1 h-1.5 bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-indigo-500 rounded-full transition-all duration-300"
+              style={{
+                width: `${Math.max(20, (100 / Math.max(barsData.length, 1)))}%`,
+                marginLeft: `${
+                  (selectedBarIndex / Math.max(barsData.length - 1, 1)) *
+                  (100 - Math.max(20, 100 / Math.max(barsData.length, 1)))
+                }%`,
+              }}
+            />
+          </div>
+
+          {/* ⏭ Jump to last bar — flush to right edge */}
+          <button
+            onClick={() => {
+              if (barsData.length === 0) return;
+              const last = barsData.length - 1;
+              setSelectedBarIndex(last);
+              scrollToBar(last);
+            }}
+            disabled={barsData.length === 0 || selectedBarIndex === barsData.length - 1}
+            className="text-xl text-indigo-500 dark:text-indigo-400 disabled:opacity-25 active:scale-90 transition-transform flex-shrink-0 w-10 flex items-center justify-center select-none leading-none h-8"
+            title="Go to latest"
+          >
+            ⏭
+          </button>
         </div>
       </div>
 
@@ -1144,14 +1359,14 @@ export function HistoryView() {
       <div className="bg-white dark:bg-slate-800 p-4 border-b border-gray-100 dark:border-slate-700">
         <div className="text-center mb-4">
           <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">
-            Selected {filterType === 'weekly' ? 'Week' : filterType === 'monthly' ? 'Month' : 'Year'}
+            Selected {getSelectedLabel()}
           </p>
           <p className="text-sm font-bold text-indigo-600 dark:text-indigo-400 mt-1 flex items-center justify-center gap-2">
             <span>📿</span>
             {selectedStats.displayRange}
           </p>
         </div>
-        
+
         <div className="grid grid-cols-3 gap-4">
           <div className="text-center">
             <p className="text-2xl font-bold text-indigo-600">{selectedStats.count.toLocaleString()}</p>
@@ -1169,8 +1384,8 @@ export function HistoryView() {
       </div>
 
       {/* Recent Logs Toggle */}
-      <button 
-        onClick={() => setShowLogs(!showLogs)} 
+      <button
+        onClick={() => setShowLogs(!showLogs)}
         className="w-full bg-indigo-600 text-white py-3 font-semibold flex items-center justify-center gap-2"
       >
         <i className={`fas fa-chevron-${showLogs ? 'up' : 'down'}`}></i>
@@ -1178,7 +1393,7 @@ export function HistoryView() {
         <i className={`fas fa-chevron-${showLogs ? 'up' : 'down'}`}></i>
       </button>
 
-      {/* Logs Table - Remark Column Removed */}
+      {/* Logs Table */}
       {showLogs && (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -1192,11 +1407,13 @@ export function HistoryView() {
               </tr>
             </thead>
             <tbody>
-              {historyData.slice(0, 15).map((entry) => (
-                <tr 
-                  key={entry.dateStr} 
+              {historyData.map((entry) => (
+                <tr
+                  key={entry.dateStr}
                   className={`border-b border-gray-100 dark:border-slate-700 cursor-pointer ${getRowClass(entry)}`}
-                  onClick={() => setRemarkModal({ date: entry.displayDate, remark: entry.remarks.join(', ') })}
+                  onClick={() =>
+                    setRemarkModal({ date: entry.displayDate, remark: entry.remarks.join(', ') })
+                  }
                 >
                   <td className="py-2 px-2 text-gray-800 dark:text-gray-200 text-xs">
                     {entry.displayDate}
@@ -1207,8 +1424,12 @@ export function HistoryView() {
                     )}
                   </td>
                   <td className="py-2 px-2 text-gray-600 dark:text-gray-400 text-xs">{entry.dayShort}</td>
-                  <td className="py-2 px-2 text-center font-semibold text-gray-800 dark:text-white">{entry.mantraCount}</td>
-                  <td className="py-2 px-2 text-center font-semibold text-gray-800 dark:text-white">{entry.malaCount}</td>
+                  <td className="py-2 px-2 text-center font-semibold text-gray-800 dark:text-white">
+                    {entry.mantraCount}
+                  </td>
+                  <td className="py-2 px-2 text-center font-semibold text-gray-800 dark:text-white">
+                    {entry.malaCount}
+                  </td>
                   <td className="py-2 px-2 text-center">
                     <button
                       onClick={(e) => {
@@ -1228,8 +1449,8 @@ export function HistoryView() {
       )}
 
       {/* Download Button */}
-      <button 
-        onClick={() => setShowDatePicker(true)} 
+      <button
+        onClick={() => setShowDatePicker(true)}
         className="w-full bg-emerald-600 text-white py-4 font-semibold flex items-center justify-center gap-2"
       >
         <i className="fas fa-file-pdf"></i>
@@ -1241,9 +1462,11 @@ export function HistoryView() {
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
           <div className="bg-white dark:bg-slate-800 rounded-2xl w-full max-w-sm overflow-hidden animate-fade-in">
             <div className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white p-4 text-center">
-              <p className="text-lg font-bold">{viewEntry.displayDate}, {viewEntry.dayName}</p>
+              <p className="text-lg font-bold">
+                {viewEntry.displayDate}, {viewEntry.dayName}
+              </p>
             </div>
-            
+
             <div className="p-4 space-y-3">
               <div className="flex justify-between items-center py-2 border-b border-gray-100 dark:border-slate-700">
                 <span className="text-gray-600 dark:text-gray-400 text-sm">📿 Mantras Counted</span>
@@ -1259,7 +1482,7 @@ export function HistoryView() {
                   {viewEntry.isPracticeDay ? 'Practice Day' : 'Rest Day'}
                 </span>
               </div>
-              
+
               <div className="py-2">
                 <p className="text-gray-600 dark:text-gray-400 text-sm mb-2">📝 Remarks</p>
                 {viewEntry.remarks.map((remark, i) => (
@@ -1271,14 +1494,14 @@ export function HistoryView() {
                   </div>
                 ))}
               </div>
-              
+
               <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg p-3 text-center">
                 <p className="text-amber-700 dark:text-amber-400 text-sm italic">
                   "{getRandomSacredMessage()}"
                 </p>
               </div>
             </div>
-            
+
             <button
               onClick={() => setViewEntry(null)}
               className="w-full py-4 bg-gray-100 dark:bg-slate-700 text-gray-700 dark:text-gray-300 font-semibold hover:bg-gray-200 dark:hover:bg-slate-600 transition-colors"
@@ -1297,10 +1520,12 @@ export function HistoryView() {
               <p className="text-lg font-bold">Generate PDF Report</p>
               <p className="text-sm text-white/80">Select date range</p>
             </div>
-            
+
             <div className="p-4 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">From Date</label>
+                <label className="block text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">
+                  From Date
+                </label>
                 <input
                   type="date"
                   value={fromDate}
@@ -1311,7 +1536,9 @@ export function HistoryView() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">To Date</label>
+                <label className="block text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">
+                  To Date
+                </label>
                 <input
                   type="date"
                   value={toDate}
@@ -1322,7 +1549,7 @@ export function HistoryView() {
                 />
               </div>
             </div>
-            
+
             <div className="flex flex-col">
               <button
                 onClick={generatePDFReport}
